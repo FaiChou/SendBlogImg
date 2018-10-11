@@ -1,0 +1,126 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+import os
+import tempfile
+import imghdr
+import shutil
+import subprocess
+import sys
+import time
+
+from AppKit import NSPasteboard, NSPasteboardTypePNG,\
+        NSPasteboardTypeTIFF, NSPasteboardTypeString,\
+        NSFilenamesPboardType
+
+# image_file, need_format, need_compress
+NONE_IMG = (None, False, None)
+
+API_ROOT = 'https://raw.githubusercontent.com/FaiChou/faichou.github.io/master/img'
+MD_IMG_WIDTH = 500
+BLOG_IMG_PATH = '/Users/FaiChou/faichou.github.io/img/'
+
+def _convert_to_png(from_path, to_path):
+    # convert it to png file
+    os.system('sips -s format png %s --out %s' % (from_path, to_path))
+
+def get_paste_img_file():
+    ''' get a img file from clipboard;
+    the return object is a `tempfile.NamedTemporaryFile`
+    you can use the name field to access the file path.
+    the tmp file will be delete as soon as possible(when gc happened or close explicitly)
+    you can not just return a path, must hold the reference'''
+
+    pb = NSPasteboard.generalPasteboard()
+    data_type = pb.types()
+
+    # copy a file
+    if NSFilenamesPboardType in data_type:
+        # file in clipboard
+        img_path = pb.propertyListForType_(NSFilenamesPboardType)[0]
+        img_type = imghdr.what(img_path)
+
+        if not img_type:
+            # not image file
+            return NONE_IMG
+
+        if img_type not in ('png', 'jpeg', 'gif'):
+            # now only support png & jpg & gif
+            return NONE_IMG
+
+        is_gif = img_type == 'gif'
+        _file = tempfile.NamedTemporaryFile(suffix=img_type)
+        tmp_clipboard_img_file = tempfile.NamedTemporaryFile()
+        shutil.copy(img_path, tmp_clipboard_img_file.name)
+        if not is_gif:
+            _convert_to_png(tmp_clipboard_img_file.name, _file.name)
+        else:
+            shutil.copy(tmp_clipboard_img_file.name, _file.name)
+        tmp_clipboard_img_file.close()
+        return _file, False, 'gif' if is_gif else 'png'
+
+    # copy a string
+    if NSPasteboardTypeString in data_type:
+        # make this be first, because plain text may be TIFF format?
+        # string todo, recognise url of png & jpg
+        return NONE_IMG
+
+    supported_image_format = (NSPasteboardTypePNG, NSPasteboardTypeTIFF)
+
+    # copy an image (maybe screencut)
+    if any(filter(lambda f: f in data_type, supported_image_format)):
+        # do not care which format it is, we convert it to png finally
+        # system screen shotcut is png, QQ is tiff
+        tmp_clipboard_img_file = tempfile.NamedTemporaryFile()
+        # print(tmp_clipboard_img_file.name)
+        png_file = tempfile.NamedTemporaryFile(suffix='png')
+        for fmt in supported_image_format:
+            data = pb.dataForType_(fmt)
+            if data: break
+        ret = data.writeToFile_atomically_(tmp_clipboard_img_file.name, False)
+        if not ret: return NONE_IMG
+
+        _convert_to_png(tmp_clipboard_img_file.name, png_file.name)
+        # close the file explicitly
+        tmp_clipboard_img_file.close()
+        return png_file, True, 'png'
+
+def notice(msg, title="notice"):
+    ''' notoce message in notification center'''
+    os.system('osascript -e \'display notification "%s" with title "%s"\'' % (msg, title))
+
+
+def try_compress_png(raw_img, need_compress):
+    ''' use pngquant to compress:https://github.com/pornel/pngquant'''
+    if not need_compress: return raw_img
+    if not os.path.exists(raw_img.name): return raw_img
+    tmp_file = tempfile.NamedTemporaryFile()
+    return tmp_file if not subprocess.call('pngquant/pngquant --force %s -o %s' \
+        % (raw_img.name, tmp_file.name), shell=True) else raw_img
+
+def run():
+    img_file, need_format, format = get_paste_img_file()
+    if img_file:
+        # has image
+
+        # use time to generate a unique upload_file name, we can not use the tmp file name
+        upload_name = "%s.%s" % (int(time.time() * 1000), format)
+        if need_format:
+            size_str = subprocess.check_output('sips -g pixelWidth %s | tail -n1 | cut -d" " -f4' % img_file.name, shell=True)
+            size = int(size_str.strip()) / 2
+            markdown_url = '<img src="%s/%s" width="%d" />' % (API_ROOT, upload_name, MD_IMG_WIDTH)
+        else:
+            markdown_url = '%s/%s' % (API_ROOT, upload_name)
+
+        compressed_file = try_compress_png(img_file, format!='gif')
+        shutil.copyfile(compressed_file.name, BLOG_IMG_PATH+upload_name)
+        os.system("cd %s && git add . && git ci -m 'add new asset' && git push" % BLOG_IMG_PATH)
+
+        # make it to clipboard
+        os.system("echo '%s' | pbcopy" % markdown_url)
+        # os.system('osascript -e \'tell application "System Events" to keystroke "v" using command down\'')
+    else:
+        notice("剪切版里没有图片！")
+        exit(1)
+
+if __name__ == '__main__':
+    run()
